@@ -100,36 +100,53 @@ EN: 06:10/21:00
 
 ## 👤 나의 담당 역할 (My Role)
 
-**팀 내 포지션: Backend & Infrastructure Engineer (백엔드 API 개발 및 로그/데이터 인프라 구축)**
+**팀 내 포지션: Backend & Infrastructure Engineer (백엔드 개발 및 로그/데이터 인프라 구축)**
 
 ### 백엔드 개발
-- FastAPI 기반의 고성능 RESTful API 서버 아키텍처 설계 및 구현
-- 메인 대시보드(긍/부정 도넛 차트, 섹터별 비교) 및 성향 분석 검색 API 개발
-- 평소 대비 섹터별 긍정률 변화량을 계산하고 정렬하여 서빙하는 급등 기사 분석 로직 구현
+- FastAPI 기반 RESTful API 서버 설계 및 구현
+- ES `msearch`를 활용한 대시보드 데이터 API 개발
+  - 오늘/7일치 `doc_id` 수집 → `sector × tendency` 집계 → 긍/부정 비율 계산
+- 성향 분석 검색 API 개발
+  - `title`, `keywords`, `ner.company`, `ner.person`, `ner.region` 5개 필드 OR 조건 검색
+  - 1순위 기사 부족 시 연관도 Top3 섹터 기반 2순위 기사 자동 보완 로직 구현
+- 급등 기사 분석 API 개발
+  - 오늘 긍정률 - 7일 평균 긍정률 = 변화량 계산 후 절댓값 내림차순 정렬 서빙
 
-### 로그 시스템
-- 시스템 안정성 및 파이프라인 모니터링을 위한 Elasticsearch 기반 다중 로그 인덱스 설계
-- 운영 목적에 따른 4개 영역(crawl, ml, system, user) 로그 분리 및 수집 체계 구축
-- 실시간 로그 필터링(레벨/주체/시간/키워드) 및 CSV 내보내기 기능의 관리자용 LogViewer 백엔드 구현
+### 로그 시스템 설계 및 구현
+- Elasticsearch 기반 4개 영역 로그 인덱스 분리 설계
+  - `log_crawl` / `log-ml` / `log-system` / `log-user` / `log-all`
+- 커스텀 `ESHandler` 구현 (Python `logging.Handler` 상속)
+  - 로그 발생 시 subject별 인덱스 + `fp-logs-all`에 동시 기록
+- 관리자용 LogViewer 백엔드 구현
+  - 레벨 / 주체 / 시간 범위 / 키워드 필터 기반 로그 조회
+  - 조회 결과 CSV 내보내기 (utf-8-sig BOM 적용으로 Excel 한글 깨짐 방지)
 
-### ES / DB 서버 구축
-- 뉴스 원문 및 분석 데이터 저장·색인을 위한 Elasticsearch 분산 데이터 노드 구축
-- 한국어 형태소 분석기(Nori) 및 영문 Standard Analyzer 매핑 설계를 통한 검색 성능 최적화
-- 서비스 회원 관리 및 권한 제어를 위한 MariaDB 관계형 데이터베이스(RDB) 스키마 설계
+### Elasticsearch / MariaDB 구축
+- `news_ko` 인덱스: 한국어 Nori 형태소 분석기 (`decompound_mode: mixed`) 적용
+- `news_en` 인덱스: Standard Analyzer 적용
+- `analyze` 인덱스: ML 분석 결과 저장 (`sector`, `keywords`, `ner`, `tendency`, `tend_score`)
+- MariaDB 스키마 설계
+  - `user`, `userInterests`, `loginFail`, `retryQueue` 테이블 설계
 
-### 보안 및 인증 (단방향 암호화)
-- 사용자 비밀번호 보호를 위해 Argon2와 Pepper(HMAC-SHA256)를 결합한 안전한 이중 해싱 단방향 암호화 적용
-- 브라우저용 Session Cookie 및 외부 툴 대응을 위한 관리자용 API Key 인증 체계 구축
-- 악성 접근 차단을 위한 로그인 5회 실패 시 24시간 계정 잠금 보안 로직 구현
+### 보안 및 인증
+- Argon2 + Pepper (HMAC-SHA256) 이중 해싱으로 비밀번호 단방향 암호화
+- 브라우저용 세션 쿠키 + 외부 도구(Postman/curl)용 API Key 이중 인증 체계 구축
+- 로그인 5회 실패 시 24시간 계정 잠금 로직 구현
+- 임시 비밀번호 발급 기능 구현 (이메일 발송 실패 시 DB rollback 트랜잭션 처리)
 
-### 에러 해결 및 사전 테스팅
-- Pytest 기반의 API 엔드포인트 기능 테스트 및 모듈별 통합 사전 테스팅 주도
-- 크롤링 및 ML 파이프라인 에러 발생 시 자동 재시도 및 누락 URL 재수집을 처리하는 운영 예외 처리 로직 구현
-- 분석 결과 예외 처리를 위한 '비정형 성향치 수동 보정(긍정/부정/중립/삭제) API' 개발로 데이터 무결성 확보
+### 운영 예외 처리
+- 크롤링 실패 URL을 `retryQueue` 테이블에 적재하고 매일 03:00 스케줄에 자동 재시도하는 재크롤링 파이프라인 구현
+  - 상태 관리: `PENDING → RUNNING → SUCCESS / FAIL`
+  - 최대 3회 재시도 초과 시 영구 FAIL 처리
+  - 성공 적재 후 ML 파이프라인 자동 실행 연동
+- ES `delete_by_query`의 비동기 처리로 인한 문서 유실 버그 발견 및 `refresh=True` 옵션 적용으로 해결
+- 비정형 성향치(tend_score 5점 이하 / 95점 이상) 수동 보정 API 개발
+  - `analyze` + `search` 인덱스 동시 업데이트로 데이터 정합성 확보
 
 ### 프로젝트 초기 문서 작업
-- 프로젝트의 전체적인 기능 요구사항 정의서 및 시스템 아키텍처 초안 작성
-- 팀원 간 효율적인 협업을 위한 데이터베이스 개체 관계 다이어그램(ERD) 및 API 명세서 설계
+- 기능 요구사항 정의서 및 ERD 설계
+- API 명세서 작성
+- 발표 PPT 작성 및 질의 담당
 
 <br>
 
@@ -202,7 +219,7 @@ python crawling/collectEnNews.py
 
 | 이름 | 역할 |
 |---|---|
-| 김서율 | 백엔드 개발, 로그 시스템, ES/DB 서버 구축, 테스팅 |
+| 김서율 | 백엔드 개발, 로그 시스템 설계, ES/DB 서버 구축, 보안/인증, 테스팅 |
 | 곽충범 | 크롤링, ML/NLP 파이프라인, ES 서버 구축 |
 | 방정환 | 프론트엔드 개발, UI/UX 설계 |
 | 이재민 | 크롤링, 백엔드 개발 |
